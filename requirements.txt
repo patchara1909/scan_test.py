@@ -1,0 +1,8 @@
+# Minimal pinned dependencies for this project (tested working)
+face_recognition==1.2.3
+# dlib and face_recognition require numpy 1.x
+numpy==1.26.4
+# OpenCV 4.11 is compatible with numpy 1.x
+opencv-python==4.11.0.86
+pyzbar
+requests

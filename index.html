@@ -24,7 +24,7 @@
             <h1 class="text-2xl font-bold uppercase tracking-tight">Student Login</h1>
         </div>
         <div class="p-8 space-y-4">
-            <input type="text" id="login-id" placeholder="รหัสนักศึกษา (6612247037)" class="w-full px-4 py-3 rounded-xl bg-gray-50 border outline-none text-sm">
+            <input type="text" id="login-id" placeholder="รหัสนักศึกษา" class="w-full px-4 py-3 rounded-xl bg-gray-50 border outline-none text-sm">
             <input type="password" id="login-pass" placeholder="วันเกิด (เช่น 19/9/2547)" class="w-full px-4 py-3 rounded-xl bg-gray-50 border outline-none text-sm">
             <button onclick="handleLogin()" class="w-full gradient-bg text-white font-bold py-3 rounded-xl shadow-lg active:scale-95 transition-all">LOGIN</button>
             <p id="login-error" class="text-red-500 text-[10px] text-center hidden"></p>
@@ -73,7 +73,23 @@
     </div>
 
     <script>
-        const SERVER_URL = "http://127.0.0.1:5000"; // ใช้ Local IP สำหรับรันในเครื่องเดียวกัน
+        let SERVER_URL;
+        let loggedInSid = null;
+        
+        if (window.location.protocol === 'file:') {
+            // page ถูกเปิดจากไฟล์โดยตรง
+            console.warn('⚠️ เปิดจากไฟล์โดยตรง กรุณาเปิดผ่าน http://<ip>:5000/');
+            SERVER_URL = prompt('กรุณาใส่ URL เซิร์ฟเวอร์ Flask (เช่น http://127.0.0.1:5000 หรือ http://192.168.1.129:5000)');
+            if (!SERVER_URL) {
+                alert('ต้องมี URL เซิร์ฟเวอร์เพื่อใช้งาน');
+            }
+        } else {
+            // page ถูกเปิดผ่าน HTTP – สร้าง SERVER_URL ไปยังเซิร์ฟเวอร์ port 5000
+            const protocol = window.location.protocol; // http: or https:
+            const hostname = window.location.hostname; // 127.0.0.1 or 192.168.x.x
+            SERVER_URL = `${protocol}//${hostname}:5000`;
+            console.debug('✓ SERVER_URL:', SERVER_URL);
+        }
         let timerInterval;
 
         async function handleLogin() {
@@ -81,15 +97,26 @@
             const pass = document.getElementById('login-pass').value;
             const errorElement = document.getElementById('login-error');
 
+            console.debug('logging in', sid, 'using server', SERVER_URL);
+
+            if (window.location.protocol === 'file:') {
+                errorElement.innerText = '⚠️ กรุณาเปิดหน้าเว็บผ่าน http:// หรือ https:// ไม่ใช่ไฟล์โดยตรง';
+                errorElement.classList.remove('hidden');
+                return;
+            }
+
             try {
                 const res = await fetch(`${SERVER_URL}/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: sid, password: pass })
                 });
+                console.debug('HTTP status', res.status);
                 const data = await res.json();
+                console.debug('response', data);
 
                 if (data.status === "success") {
+                    loggedInSid = sid;
                     document.getElementById('login-section').classList.add('hidden');
                     document.getElementById('dashboard-section').classList.remove('hidden');
                     generateQR();
@@ -98,7 +125,8 @@
                     errorElement.classList.remove('hidden');
                 }
             } catch (e) {
-                errorElement.innerText = "⚠️ ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้";
+                console.error('login fetch failed', e);
+                errorElement.innerText = "⚠️ ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ (เช็ค IP หรือ Firewall)";
                 errorElement.classList.remove('hidden');
             }
         }
@@ -106,37 +134,49 @@
         async function showHistory() {
             document.getElementById('history-modal').classList.remove('hidden');
             const content = document.getElementById('history-content');
-            content.innerHTML = '<p class="text-center text-[10px] py-10 text-gray-400 italic">กำลังโหลดข้อมูล...</p>';
+            content.innerHTML = '<p class="text-center text-[10px] py-10 text-gray-400 italic">กำลังโหลด...</p>';
             try {
+                console.debug('fetching', `${SERVER_URL}/get_history`);
                 const res = await fetch(`${SERVER_URL}/get_history`);
+                console.debug('status', res.status);
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
                 const data = await res.json();
+                console.debug('history records:', data.length);
                 content.innerHTML = data.length ? data.map(item => `
                     <div class="bg-white p-3 rounded-xl border border-gray-100 flex justify-between items-center shadow-sm">
-                        <div class="flex flex-col"><span class="text-[10px] font-bold">${item.Date}</span><span class="text-[9px] text-gray-400">${item.Name}</span></div>
-                        <div class="text-[10px] font-mono font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded">${item.Time}</div>
+                        <div class="flex flex-col"><span class="text-[10px] font-bold">${item.date || '-'}</span><span class="text-[9px] text-gray-400">${item.name || '-'}</span></div>
+                        <div class="text-[10px] font-mono font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded">${item.time || '-'}</div>
                     </div>`).join('') : '<p class="text-center text-[10px] py-10 text-gray-400">ไม่มีข้อมูล</p>';
             } catch (e) {
-                content.innerHTML = '<p class="text-center text-red-500 text-[10px] py-10 font-bold">⚠️ เชื่อมต่อไม่ได้</p>';
+                console.error('showHistory error:', e);
+                content.innerHTML = '<p class="text-red-500 text-[10px] py-10 font-bold text-center">⚠️ เชื่อมต่อไม่ได้</p><p class="text-red-400 text-[8px] text-center px-2">' + e.toString() + '</p>';
             }
         }
 
         function closeHistory() { document.getElementById('history-modal').classList.add('hidden'); }
 
         async function generateQR() {
+            if (!loggedInSid) {
+                console.error('No logged in student id');
+                return;
+            }
+
             clearInterval(timerInterval);
             const qrContainer = document.getElementById("qrcode");
             qrContainer.innerHTML = "";
-            const token = "ATT-" + Math.random().toString(36).substr(2, 9).toUpperCase();
+            const token = loggedInSid;
             new QRCode(qrContainer, { text: token, width: 180, height: 180 });
 
             try {
                 const res = await fetch(`${SERVER_URL}/update_qr`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
+                    body: JSON.stringify({ token, student_id: loggedInSid })
                 });
                 const st = document.getElementById("sync-status");
-                if(res.ok) { st.innerText = "✓ ออนไลน์"; st.style.color = "#10b981"; }
+                if (res.ok) { st.innerText = "✓ ออนไลน์"; st.style.color = "#10b981"; }
             } catch (e) {
                 const st = document.getElementById("sync-status");
                 st.innerText = "❌ ตัดการเชื่อมต่อ"; st.style.color = "#f97316";
@@ -152,11 +192,7 @@
                 document.getElementById("progress-bar").style.width = (timeLeft / 60) * 100 + "%";
                 if (timeLeft <= 0) {
                     clearInterval(timerInterval);
-                    document.getElementById("qrcode").innerHTML = `
-                        <div class="p-10 text-red-500 text-xs text-center border-2 border-dashed border-red-200 rounded-xl bg-red-50 flex flex-col items-center justify-center h-[180px] w-[180px] mx-auto">
-                            <p class="font-bold mb-1">⚠️ QR หมดอายุ</p>
-                            <p class="text-[9px] opacity-70">กรุณากด Generate ใหม่</p>
-                        </div>`;
+                    document.getElementById("qrcode").innerHTML = `<div class="p-10 text-red-500 text-xs text-center border-2 border-dashed border-red-200 rounded-xl bg-red-50 flex flex-col items-center justify-center h-[180px] w-[180px] mx-auto"><p class="font-bold mb-1">⚠️ QR หมดอายุ</p></div>`;
                     document.getElementById("timer-text").innerText = "⚠️ หมดเวลาแล้ว";
                     document.getElementById("progress-bar").style.width = "0%";
                 }

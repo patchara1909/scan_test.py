@@ -5,7 +5,7 @@ from pyzbar.pyzbar import decode
 import time
 import requests
 
-IP = "192.168.1.129"
+IP = "127.0.0.1"
 API_URL = f"http://{IP}:5000/verify_attendance"
 MY_FACE = "me.jpg"
 
@@ -44,21 +44,39 @@ while True:
         face_locations = face_recognition.face_locations(frame)
         face_encodings = face_recognition.face_encodings(frame, face_locations)
 
-        for enc in face_encodings:
-            match = face_recognition.compare_faces([my_encoding], enc, tolerance=0.45)
+        match_found = False
+        for (top, right, bottom, left), enc in zip(face_locations, face_encodings):
+            match = face_recognition.compare_faces([my_encoding], enc, tolerance=0.4)
             if True in match:
-                payload = {"student_id": "6612247037", "student_name": "Miss Patcharaporn", "token": qr_data}
-                try:
-                    res = requests.post(API_URL, json=payload)
-                    if res.status_code == 200:
-                        label = "ATTENDANCE SUCCESS!"
-                        color = (0, 255, 0)
-                        cv2.rectangle(frame, (0,0), (640,50), color, -1)
-                        cv2.putText(frame, label, (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-                        cv2.imshow('Scanner', frame)
-                        cv2.waitKey(1500)
-                        current_step = 1
-                except: print("Server Error")
+                match_found = True
+                box_color = (0, 255, 0)
+                label_face = "MATCH"
+            else:
+                box_color = (0, 0, 255)
+                label_face = "NOT MATCH"
+
+            # Draw face bounding box + label
+            cv2.rectangle(frame, (left, top), (right, bottom), box_color, 2)
+            cv2.putText(frame, label_face, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+
+        # If we found a matching face, proceed with attendance API call
+        if match_found:
+            payload = {"student_id": "6612247037", "student_name": "Miss Patcharaporn", "token": qr_data}
+            try:
+                res = requests.post(API_URL, json=payload)
+                if res.status_code == 200:
+                    label = "ATTENDANCE SUCCESS!"
+                    color = (0, 255, 0)
+                    cv2.rectangle(frame, (0,0), (640,50), color, -1)
+                    cv2.putText(frame, label, (10,35), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                    cv2.imshow('Scanner', frame)
+                    cv2.waitKey(1500)
+                    current_step = 1
+            except:
+                print("Server Error")
+        else:
+            # show red status bar when no matching face found
+            color = (0, 0, 255)
 
     cv2.rectangle(frame, (0,0), (640,50), color, -1)
     cv2.putText(frame, label, (10,35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)

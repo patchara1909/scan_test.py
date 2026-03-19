@@ -1,140 +1,256 @@
 import cv2
 import face_recognition
-import numpy as np
 from pyzbar.pyzbar import decode
+import sqlite3
+import re
 import os
+import sys
+import numpy as np
+from datetime import datetime, timedelta
 import time
-import csv
-from datetime import datetime
 
-# =================================================================
-# ส่วนที่ 1: ตั้งค่าไฟล์บันทึกข้อมูล (Excel/CSV)
-# =================================================================
-log_file = "attendance.csv"
-if not os.path.exists(log_file):
-    with open(log_file, mode='w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Date', 'Time', 'QR_Data', 'Name', 'Status'])
+# ตรวจสอบเวอร์ชัน numpy เพื่อหลีกเลี่ยงปัญหา dlib/face_recognition
+try:
+    _np_major = int(np.__version__.split('.', 1)[0])
+except Exception:
+    _np_major = None
 
-# =================================================================
-# ส่วนที่ 2: โหลดข้อมูลใบหน้าต้นฉบับ
-# =================================================================
-print("กำลังโหลดข้อมูลใบหน้า... กรุณารอสักครู่")
-image_path = "me.jpg" 
+if _np_major is not None and _np_major >= 2:
+    print(f"⚠️ Incompatible numpy version {_np_major} detected ({np.__version__}). face_recognition/dlib ต้องการ numpy 1.x.")
+    print("   ให้รัน: pip install \"numpy<2\"\n")
+    sys.exit(1)
 
-img_temp = cv2.imread(image_path)
-your_image = cv2.cvtColor(img_temp, cv2.COLOR_BGR2RGB)
-your_face_encoding = face_recognition.face_encodings(your_image)[0]
-known_face_encodings = [your_face_encoding]
-known_face_names = ["Miss Patcharaporn Khedkin"] # <-- แก้ชื่อของคุณตรงนี้
+# --- 1. ตั้งค่าพื้นฐาน ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, 'attendance.db')
 
-# =================================================================
-# ส่วนที่ 3: เริ่มระบบกล้องและระบบจับเวลาถอยหลัง
-# =================================================================
+# --- 2. ฟังก์ชันแก้ไขปัญหา "Unsupported image type" ---
+def load_and_fix_image(path):
+    """โหลดภาพด้วย OpenCV และบังคับแปลงเป็น 8-bit RGB มาตรฐาน"""
+    try:
+        # ใช้ OpenCV อ่านภาพ (รองรับไฟล์หลายแบบกว่า face_recognition โดยตรง)
+        img = cv2.imread(path)
+        if img is None:
+            return None
+        
+        # บังคับแปลงเป็น 8-bit (กันพวกภาพ 16-bit หรือ CMYK)
+        img = cv2.convertScaleAbs(img)
+        
+        # แปลงจาก BGR (OpenCV) เป็น RGB (face_recognition)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception as e:
+        print(f"⚠️ พยายามซ่อมแซมไฟล์ {os.path.basename(path)} แต่ไม่สำเร็จ: {e}")
+        return None
+
+# --- 3. โหลดข้อมูลใบหน้าจากฐานข้อมูล ---
+known_face_encodings = []
+known_face_names = []
+known_face_ids = []
+
+def save_attendance(student_id, name):
+    """บันทึกการเช็คชื่อเข้าฐานข้อมูล"""
+    try:
+        now = datetime.now()
+        date_str = now.strftime('%Y-%m-%d')
+        time_str = now.strftime('%H:%M:%S')
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO attendance (date, time, student_id, name, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (date_str, time_str, student_id, name, 'Success'))
+        conn.commit()
+        conn.close()
+        
+        print(f"💾 บันทึกสำเร็จ: {name} ({student_id}) เมื่อ {date_str} {time_str}")
+        return True
+    except Exception as e:
+        print(f"❌ บันทึกไม่สำเร็จ: {e}")
+        return False
+
+def load_data():
+    print(f"📂 กำลังตรวจสอบฐานข้อมูลที่: {DB_FILE}")
+    if not os.path.exists(DB_FILE):
+        print("❌ ไม่พบไฟล์ฐานข้อมูล attendance.db!")
+        return
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT student_id, name FROM students")
+        rows = cursor.fetchall()
+        conn.close()
+
+        for sid, sname in rows:
+            # ตรวจสอบไฟล์ภาพ (ลองทั้ง .jpg และ .png)
+            img_found = False
+            for ext in ['.jpg', '.JPG', '.png']:
+                img_path = os.path.join(BASE_DIR, f"{sid}{ext}")
+                if os.path.exists(img_path):
+                    img_found = True
+                    break
+            
+            if img_found:
+                # ใช้ฟังก์ชันซ่อมแซมภาพที่เราสร้างไว้
+                image_rgb = load_and_fix_image(img_path)
+                
+                if image_rgb is not None:
+                    encs = face_recognition.face_encodings(image_rgb)
+                    if encs:
+                        known_face_encodings.append(encs[0])
+                        known_face_names.append(sname)
+                        known_face_ids.append(str(sid))
+                        print(f"✔️ โหลดสำเร็จ: {sname} ({sid})")
+                    else:
+                        print(f"⚠️ พบรูปภาพ {sid} แต่ AI ตรวจไม่พบใบหน้าในรูป")
+                else:
+                    print(f"❌ ไฟล์ภาพ {sid} มีปัญหาด้านรูปแบบข้อมูลสี")
+            else:
+                print(f"🔍 ไม่พบไฟล์ภาพสำหรับรหัส: {sid}")
+        
+        print(f"🚀 สรุป: โหลดข้อมูลนักศึกษาได้ทั้งหมด {len(known_face_names)} คน")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในระบบโหลดข้อมูล: {e}")
+
+load_data()
+
+# ตรวจสอบ: หากยังโหลดไม่ได้สักคน โปรแกรมจะหยุดเพื่อไม่ให้กล้องเปิดค้างเปล่าๆ
+if len(known_face_ids) == 0:
+    print("\n‼️ ระบบไม่สามารถรันได้เนื่องจากไม่มีข้อมูลใบหน้าที่พร้อมใช้งาน ‼️")
+    print("คำแนะนำ: ลองใช้มือถือถ่ายรูปใบหน้าใหม่แล้วเซฟเป็น .jpg ลงในโฟลเดอร์นี้")
+    sys.exit()
+
+# --- 4. ระบบกล้องและการทำงาน ---
+print("📸 กำลังเปิดกล้อง... (กด 'q' เพื่อออก)")
 cap = cv2.VideoCapture(0)
-font = cv2.FONT_HERSHEY_SIMPLEX
+state = 'QR'
+expected_id, expected_name = None, None
+face_scan_timeout = None
+success_display_until = None
+# สถานะสำหรับค้างกรอบหน้า 2 วินาที
+displaying_match = False
+match_start = 0
+match_boxes = []
 
-current_step = 1 
-student_data_from_qr = ""
-is_recorded = False 
-qr_scan_time = 0 # เก็บเวลาที่สแกน QR สำเร็จ
-timeout_limit = 3 # ตั้งเวลาถอยหลัง (วินาที)
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+        now = datetime.now()
 
-print("ระบบพร้อมใช้งาน! รอสแกน QR Code...")
+        # ถ้าอยู่ในช่วงค้างกรอบ ให้ตรวจหน้าต่อเนื่องและอัพเดทพิกัดกรอบ
+        if displaying_match:
+            elapsed = time.time() - match_start
+            
+            # ตรวจหน้า update กรอบให้ตามหน้าใหม่
+            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            face_locs = face_recognition.face_locations(rgb_small)
+            expected_idx = known_face_ids.index(expected_id) if expected_id in known_face_ids else None
+            match_boxes = []
+            
+            if face_locs:
+                face_encs = face_recognition.face_encodings(rgb_small, face_locs)
+                for (top, right, bottom, left), enc in zip(face_locs, face_encs):
+                    top *= 2
+                    right *= 2
+                    bottom *= 2
+                    left *= 2
+                    if expected_idx is not None and True in face_recognition.compare_faces([known_face_encodings[expected_idx]], enc, tolerance=0.4):
+                        box_color = (0, 255, 0)
+                        label = "MATCH"
+                    else:
+                        box_color = (0, 0, 255)
+                        label = "NOT MATCH"
+                    match_boxes.append((left, top, right, bottom, box_color, label))
+            
+            # วาดกรอบที่อัพเดทแล้ว
+            for (left, top, right, bottom, box_color, label) in match_boxes:
+                cv2.rectangle(frame, (left, top), (right, bottom), box_color, 2)
+                cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
-while True:
-    ret, frame = cap.read()
-    if not ret: break
+            if elapsed >= 2:
+                # บันทึกสำเร็จหลังค้างครบ 2 วินาที
+                save_attendance(expected_id, expected_name)
+                success_display_until = now + timedelta(seconds=3)
+                state = 'QR'
+                displaying_match = False
+                match_boxes = []
+                print(f"✅ เช็คอินสำเร็จ: {expected_name}")
+                cv2.waitKey(500)
 
-    status_bar_color = (0, 0, 0)
-    instruction_text = ""
+        # แสดงผลเมื่อสำเร็จ
+        if success_display_until and now < success_display_until:
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 255, 0), 15)
+            cv2.putText(frame, f"WELCOME: {expected_name}", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
 
-    # --- STEP 1: รอสแกน QR Code ---
-    if current_step == 1:
-        instruction_text = "STEP 1: Please Scan QR Code"
-        status_bar_color = (0, 165, 255)
-        decoded_objects = decode(frame)
-        for obj in decoded_objects:
-            student_data_from_qr = obj.data.decode('utf-8')
-            current_step = 2
-            is_recorded = False
-            qr_scan_time = time.time() # เริ่มนับเวลาทันทีที่สแกน QR ติด
-            print(f"QR Scanned: {student_data_from_qr}")
+        # โหมดสแกน QR
+        elif state == 'QR':
+            cv2.putText(frame, "STEP 1: SCAN QR CODE", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            for obj in decode(frame):
+                qr_data = obj.data.decode('utf-8').strip()
+                clean_id = ''.join(re.findall(r"\d+", qr_data))
+                
+                if clean_id in known_face_ids:
+                    idx = known_face_ids.index(clean_id)
+                    expected_id, expected_name = clean_id, known_face_names[idx]
+                    state, face_scan_timeout = 'FACE', now + timedelta(seconds=15)
+                    print(f"📱 QR ผ่าน: กำลังรอสแกนหน้า {expected_name}")
 
-        for obj in decoded_objects:
-            pts = np.array([obj.polygon], np.int32).reshape((-1, 1, 2))
-            cv2.polylines(frame, [pts], True, (255, 0, 0), 3)
+        # โหมดสแกนใบหน้า
+        elif state == 'FACE':
+            remaining = int((face_scan_timeout - now).total_seconds())
+            cv2.putText(frame, f"STEP 2: SCAN FACE ({remaining}s)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(frame, f"TARGET: {expected_name}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
-    # --- STEP 2: สแกนใบหน้า (พร้อมระบบนับถอยหลัง 3 วิ) ---
-    elif current_step == 2:
-        # คำนวณเวลาที่ผ่านไป
-        elapsed_time = time.time() - qr_scan_time
-        remaining_time = max(0, timeout_limit - int(elapsed_time))
-        
-        instruction_text = f"STEP 2: Scan Face (Timeout in {remaining_time}s)"
-        status_bar_color = (255, 0, 0)
+            if now > face_scan_timeout: state = 'QR'
+            elif not displaying_match:  # เฉพาะเมื่อไม่ได้อยู่ในช่วงค้างกรอบ
+                small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                face_locs = face_recognition.face_locations(rgb_small)
+                if face_locs:
+                    face_encs = face_recognition.face_encodings(rgb_small, face_locs)
 
-        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_small_frame)
-        
-        # --- เงื่อนไขการ Reset ---
-        # 1. ถ้าไม่เจอหน้าเลย และเวลาเกิน 3 วินาที
-        if len(face_locations) == 0 and elapsed_time > timeout_limit:
-            print("Timeout: No face detected. Resetting...")
-            current_step = 1
-            student_data_from_qr = ""
-            continue
+                    # วาดกรอบใบหน้าทุกใบ เพื่อให้เห็นว่าเรากำลังตรวจสอบรูปไหน
+                    expected_idx = known_face_ids.index(expected_id) if expected_id in known_face_ids else None
+                    match_found = False
+                    current_boxes = []
 
-        # 2. ถ้าสแกนผ่านแล้ว (is_recorded) และเอาหน้าออกไปแล้ว
-        if is_recorded and len(face_locations) == 0:
-            current_step = 1
-            student_data_from_qr = ""
-            is_recorded = False
-            continue
+                    for (top, right, bottom, left), enc in zip(face_locs, face_encs):
+                        # ปรับกลับเป็นพิกัดของเฟรมจริง (เพราะเรา resize 0.5)
+                        top *= 2
+                        right *= 2
+                        bottom *= 2
+                        left *= 2
 
-        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+                        if expected_idx is not None and True in face_recognition.compare_faces([known_face_encodings[expected_idx]], enc, tolerance=0.4):
+                            box_color = (0, 255, 0)
+                            label = "MATCH"
+                            match_found = True
+                        else:
+                            box_color = (0, 0, 255)
+                            label = "NOT MATCH"
 
-        for face_encoding, face_loc in zip(face_encodings, face_locations):
-            matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.5)
-            name = "Unknown"
-            color = (0, 0, 255)
+                        cv2.rectangle(frame, (left, top), (right, bottom), box_color, 2)
+                        cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+                        current_boxes.append((left, top, right, bottom, box_color, label))
 
-            if True in matches:
-                name = known_face_names[0]
-                color = (0, 255, 0)
-                instruction_text = "ACCESS GRANTED: Recorded!"
-                status_bar_color = (0, 255, 0)
+                    if match_found and not displaying_match:
+                        # เริ่มค้างกรอบ 2 วินาที
+                        displaying_match = True
+                        match_start = time.time()
+                        match_boxes = current_boxes
+        cv2.imshow('Attendance System', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("🛑 ออกจากโปรแกรมตามคำสั่ง (กด 'q')")
+            break
 
-                if not is_recorded:
-                    now = datetime.now()
-                    current_date = now.strftime("%Y-%m-%d")
-                    current_time = now.strftime("%H:%M:%S")
-                    
-                    with open(log_file, mode='a', newline='', encoding='utf-8-sig') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([current_date, current_time, student_data_from_qr, name, 'Success'])
-                    
-                    print(f"✔️ Recorded: {name}")
-                    is_recorded = True 
+except KeyboardInterrupt:
+    print("\n🛑 ถูกยกเลิกโดยผู้ใช้ (KeyboardInterrupt)")
 
-            top, right, bottom, left = face_loc
-            top *= 4; right *= 4; bottom *= 4; left *= 4
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-            cv2.putText(frame, name, (left, bottom + 25), font, 0.8, color, 2)
-
-    # --- แสดงผล GUI ---
-    # แถบสถานะด้านบน
-    cv2.rectangle(frame, (0, 0), (640, 50), status_bar_color, -1)
-    cv2.putText(frame, instruction_text, (10, 35), font, 0.7, (255, 255, 255), 2)
-    
-    # ข้อมูล QR ที่กำลังรันอยู่ (โชว์ที่มุมซ้ายล่าง)
-    if student_data_from_qr:
-        cv2.putText(frame, f"ID: {student_data_from_qr}", (10, 450), font, 0.6, (255, 255, 0), 2)
-
-    cv2.imshow('Smart Attendance System', frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'): break
-
-cap.release()
-cv2.destroyAllWindows()
+finally:
+    if 'cap' in globals() and cap is not None:
+        cap.release()
+    cv2.destroyAllWindows()
+    print("📷 กล้องถูกปิดเรียบร้อยแล้ว")
